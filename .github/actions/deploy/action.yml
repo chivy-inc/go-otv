@@ -1,0 +1,112 @@
+name: 'Deploy'
+description: 'Build & Deploy services'
+
+inputs:
+  aws-access-key-id:
+    description: 'aws-access-key-id'
+    required: true
+  aws-secret-access-key:
+    description: 'aws-secret-access-key'
+    required: true
+  aws-ecr-repository:
+    description: 'aws-ecr-repository'
+    required: true
+  aws-eks-region:
+    description: 'aws-eks-region'
+    required: true
+  aws-eks-cluster:
+    description: 'aws-eks-cluster'
+    required: true
+  aws-eks-namespace:
+    description: 'aws-eks-namespace'
+    required: true
+  aws-eks-deployments-name:
+    description: 'aws-eks-deployments-name is a comma separated list of deployments to update, no whitespaces allowed'
+    required: true
+  aws-eks-cronjobs-names:
+    description: 'aws-eks-cronjobs-names is a comma separated list of cronjobs to update, no whitespaces allowed'
+    required: false
+  docker-build-args:
+    description: 'docker-build-args'
+    required: false
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ inputs.aws-access-key-id }}
+        aws-secret-access-key: ${{ inputs.aws-secret-access-key }}
+        aws-region: ${{ inputs.aws-eks-region }}
+
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v1
+
+    - name: 'Build and push image to Amazon ECR Repository'
+      uses: docker/build-push-action@v2
+      with:
+        context: .
+        file: Dockerfile
+        push: true
+        tags: ${{ steps.login-ecr.outputs.registry }}/${{ inputs.aws-ecr-repository }}:${{ github.sha }}
+        build-args: ${{ inputs.docker-build-args }}
+
+    - name: Install and set up kubectl
+      shell: bash
+      run: |
+        curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+        chmod +x kubectl
+        sudo mv kubectl /usr/local/bin/
+
+    - name: Set up AWS IAM authenticator
+      shell: bash
+      run: |
+        curl -o aws-iam-authenticator https://amazon-eks.s3.us-west-2.amazonaws.com/1.19.6/2021-01-05/bin/linux/amd64/aws-iam-authenticator
+        chmod +x ./aws-iam-authenticator
+        sudo mv ./aws-iam-authenticator /usr/local/bin/
+
+    - name: Update kubeconfig
+      shell: bash
+      run: |
+        aws eks --region ${{ inputs.aws-eks-region }} update-kubeconfig --name ${{ inputs.aws-eks-cluster }}
+
+    - name: Authenticate on the cluster
+      shell: bash
+      if: success()
+      run: |
+        TOKEN=$(aws eks get-token --cluster-name ${{ inputs.aws-eks-cluster }} | jq -r .status.token)
+        ENDPOINT=$(aws eks describe-cluster --name ${{ inputs.aws-eks-cluster }} --region ${{ inputs.aws-eks-region }} --query cluster.endpoint --output text)
+
+        aws eks describe-cluster --name ${{ inputs.aws-eks-cluster }} --query cluster.certificateAuthority.data --output text | base64 --decode > ca.crt
+        kubectl config set-cluster ${{ inputs.aws-eks-cluster }} --server=$ENDPOINT --certificate-authority=ca.crt
+        kubectl config set-credentials aws --token="$TOKEN" --cluster=${{ inputs.aws-eks-cluster }}
+        kubectl config set-context --current --user=aws --cluster=${{ inputs.aws-eks-cluster }}
+
+
+    - name: Deploy deployment to Amazon EKS
+      shell: bash
+      if: success()
+      run: |
+        AWS_EKS_DEPLOYMENTS_NAMES=$(echo "${{inputs.aws-eks-deployments-name}}")
+        echo $AWS_EKS_DEPLOYMENTS_NAMES
+        DEPLOYMENTS=${AWS_EKS_DEPLOYMENTS_NAMES//,/$'\n'}
+        echo $DEPLOYMENTS
+        for deployment in $DEPLOYMENTS ; do
+          echo "Updating deployment named: $deployment"
+          kubectl set image deployments/$deployment $deployment=${{ steps.login-ecr.outputs.registry }}/${{ inputs.aws-ecr-repository }}:${{ github.sha }} --namespace ${{ inputs.aws-eks-namespace }}
+        done
+
+    - name: Deploy cronjobs to Amazon EKS
+      shell: bash
+      if: ${{ inputs.aws-eks-cronjobs-names != '' }}
+      run: |
+        AWS_EKS_CRONJOBS_NAMES=$(echo "${{inputs.aws-eks-cronjobs-names}}")
+        echo $AWS_EKS_CRONJOBS_NAMES
+        CRONJOBS=${AWS_EKS_CRONJOBS_NAMES//,/$'\n'}
+        echo $CRONJOBS
+        for job in $CRONJOBS ; do
+          echo "Updating cronjob named: $job"
+          kubectl set image cronjobs/$job $job=${{ steps.login-ecr.outputs.registry }}/${{ inputs.aws-ecr-repository }}:${{ github.sha }} --namespace ${{ inputs.aws-eks-namespace }}
+        done

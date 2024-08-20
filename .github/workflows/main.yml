@@ -1,33 +1,53 @@
+name: CD Production Workflow 
+
 on:
   push:
     branches:
-      - main
-
-name: Publish to Amazon ECR
+      - prod
+  workflow_dispatch:
 
 jobs:
   deploy:
-    name: Login, Build and Push
+    name: Login, Build, Push & Deploy on Kubernetes
     runs-on: ubuntu-latest
+    env:
+      SLACK_WEBHOOK_URL: https://hooks.slack.com/services/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
 
     steps:
-    - name: Checkout
-      uses: actions/checkout@v2
+    - name: Slack Hook - Start
+      uses: act10ns/slack@v1
+      with:
+        status: starting
+        message: "[Prod][Api] Starts Building..."
+      if: always()
 
-    - name: Configure AWS credentials
-      uses: aws-actions/configure-aws-credentials@v1
+    - name: Checkout
+      uses: actions/checkout@v3
+
+    - name: Checkout submodules
+      shell: bash
+      run: |
+        git config --file .gitmodules --get-regexp url | while read url; do
+          git config --file=.gitmodules $(echo "$url" | sed -E "s/git@github.com:|https:\/\/github.com\//https:\/\/${{ secrets.PAT }}:${{ secrets.PAT }}@github.com\//")
+        done
+        git submodule sync
+        git submodule update --init --recursive
+
+    - name: Deploy services in Staging
+      uses: ./.github/actions/deploy
       with:
         aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        aws-region: us-east-1
+        aws-ecr-repository: ciam-go-otv
+        aws-eks-region: us-east-1
+        aws-eks-cluster: cv-eks-cluster
+        aws-eks-namespace: ciam
+        aws-eks-deployments-name: ciam-go-otv
 
-    - name: Login to Amazon ECR
-      id: login-ecr
-      uses: aws-actions/amazon-ecr-login@v1
-
-    - name: "[MAIN] Build and push image to AWS ECR Repository"
-      uses: docker/build-push-action@v2
+    - name: Slack Hook - End
+      uses: act10ns/slack@v1
       with:
-        context: .
-        push: true
-        tags: ${{ steps.login-ecr.outputs.registry }}/cv-go-otv:${{ github.sha }}
+        status: ${{ job.status }}
+        steps: ${{ toJson(steps) }}
+        message: "[Prod][Api] Published !"
+      if: always()
