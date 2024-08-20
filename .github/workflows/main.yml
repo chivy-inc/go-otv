@@ -3,7 +3,7 @@ name: CD Production Workflow
 on:
   push:
     branches:
-      - prod
+      - main
   workflow_dispatch:
 
 jobs:
