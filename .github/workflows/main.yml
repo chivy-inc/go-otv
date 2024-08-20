@@ -11,7 +11,7 @@ jobs:
     name: Login, Build, Push & Deploy on Kubernetes
     runs-on: ubuntu-latest
     env:
-      SLACK_WEBHOOK_URL: https://hooks.slack.com/services/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
+      SLACK_WEBHOOK_URL: https://hooks.slack.com/services/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
 
     steps:
     - name: Slack Hook - Start
